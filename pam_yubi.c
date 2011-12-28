@@ -1,10 +1,13 @@
 #include <sys/param.h>
+#include <sys/stat.h>
 
 #include <pwd.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
 
 #define PAM_SM_AUTH
 #define PAM_SM_ACCOUNT
@@ -51,10 +54,19 @@ struct cfg
 	const char *chalresp_path;
 };
 
+int get_user_cfgfile_path(const char *, const char *, const char *, char **);
+int drop_privileges(struct passwd *, pam_handle_t *);
+int restore_privileges(pam_handle_t *);
+static int authorize_user_token(struct cfg *, const char *, const char *, pam_handle_t *);
+
+static uid_t saved_euid;
+static gid_t saved_egid;
+static gid_t *saved_groups;
+static int saved_groups_length;
+
 extern int _openpam_debug;
 
-static void
-parse_cfg (int flags, int argc, const char **argv, struct cfg *cfg)
+static void parse_cfg (int flags, int argc, const char **argv, struct cfg *cfg)
 {
 	int i;
 	memset (cfg, 0, sizeof(struct cfg));
@@ -117,6 +129,202 @@ parse_cfg (int flags, int argc, const char **argv, struct cfg *cfg)
 
 }
 
+static int check_user_token (struct cfg *cfg, const char *authfile, const char *username, const char *otp_id) {
+	char buf[1024];
+	char *s_user, *s_token;
+	int retval = 0;
+	int fd;
+	struct stat st;
+	FILE *opwfile;
+
+	fd = open(authfile, O_RDONLY, 0);
+	if (fd < 0) {
+			D("Cannot open file: %s (%s)", authfile, strerror(errno));
+			return retval;
+	}
+
+	if (fstat(fd, &st) < 0) {
+			D("Cannot stat file: %s (%s)", authfile, strerror(errno));
+			close(fd);
+			return retval;
+	}
+
+	if (!S_ISREG(st.st_mode)) {
+			D("%s is not a regular file", authfile);
+			close(fd);
+			return retval;
+	}
+
+	opwfile = fdopen(fd, "r");
+	if (opwfile == NULL) {
+			D("fdopen: %s", strerror(errno));
+			close(fd);
+			return retval;
+	}
+
+	while (fgets (buf, 1024, opwfile))
+		{
+			if (buf[strlen (buf) - 1] == '\n')
+				buf[strlen (buf) - 1] = '\0';
+			D("Authorization line: %s", buf);
+			s_user = strtok (buf, ":");
+			if (s_user && strcmp (username, s_user) == 0)
+				{
+					D("Matched user: %s", s_user);
+					do
+						{
+							s_token = strtok (NULL, ":");
+							D("Authorization token: %s", s_token);
+							if (s_token && strcmp (otp_id, s_token) == 0)
+								{
+									D("Match user/token as %s/%s", username, otp_id);
+									fclose (opwfile);
+									return 1;
+								}
+						}
+					while (s_token != NULL);
+				}
+		}
+
+	fclose (opwfile);
+
+	return 0;
+}
+
+int drop_privileges(struct passwd *pw, pam_handle_t *pamh) {
+
+	saved_euid = geteuid();
+	saved_egid = getegid();
+
+	saved_groups_length = getgroups(0, NULL);
+	if (saved_groups_length < 0) {
+		D("getgroups: %s", strerror(errno));
+		return -1;
+	}
+
+	if (saved_groups_length > 0) {
+		saved_groups = malloc(saved_groups_length * sizeof(gid_t));
+		if (saved_groups == NULL) {
+			D("malloc: %s", strerror(errno));
+			return -1;
+		}
+
+		if (getgroups(saved_groups_length, saved_groups) < 0) {
+			D("getgroups: %s", strerror(errno));
+			return -1;
+		}
+	}
+
+	if (initgroups(pw->pw_name, pw->pw_gid) < 0) {
+		D("initgroups: %s", strerror(errno));
+		return -1;
+	}
+
+	if (setegid(pw->pw_gid) < 0) {
+		D("setegid: %s", strerror(errno));
+		return -1;
+	}
+
+	if (seteuid(pw->pw_uid) < 0) {
+		D("seteuid: %s", strerror(errno));
+		return -1;
+	}
+
+	return 0;
+}
+
+int restore_privileges(pam_handle_t *pamh) {
+	if (seteuid(saved_euid) < 0) {
+		D("seteuid: %s", strerror(errno));
+		free(saved_groups);
+		return -1;
+	}
+
+	if (setegid(saved_egid) < 0) {
+		D("setegid: %s", strerror(errno));
+		free(saved_groups);
+		return -1;
+	}
+
+	if (setgroups(saved_groups_length, saved_groups) < 0) {
+		D("setgroups: %s", strerror(errno));
+	free(saved_groups);
+		return -1;
+	}
+	free(saved_groups);
+
+	return 0;
+}
+
+int get_user_cfgfile_path(const char *common_path, const char *filename, const char *username, char **fn) {
+	/* Getting file from user home directory, e.g. ~/.yubico/challenge, or
+	 * from a system wide directory.
+	 *
+	 * Format is hex(challenge):hex(response):slot num
+	 */
+	struct passwd *p;
+	char *userfile;
+	int len;
+
+	if (common_path != NULL) {
+		len = strlen(common_path) + 1 + strlen(filename) + 1;
+		if ((userfile = malloc(len)) == NULL) {
+			return 0;
+		}
+		snprintf(userfile, len, "%s/%s", common_path, filename);
+		*fn = userfile;
+		return 1;
+	}
+
+	/* No common path provided. Construct path to user's ~/.yubico/filename */
+	p = getpwnam (username);
+	if (!p)
+		return 0;
+
+	len = strlen(p->pw_dir) + 9 + strlen(filename) + 1;
+	if ((userfile = malloc(len)) == NULL) {
+		return 0;
+	}
+	snprintf(userfile, len, "%s/.yubico/%s", p->pw_dir, filename);
+	*fn = userfile;
+	return 1;
+}
+
+static int authorize_user_token(struct cfg *cfg, const char *username, const char *otp_id, pam_handle_t *pamh) {
+
+	int r;
+	char *userfile=NULL;
+	struct passwd *p;
+	p=getpwnam(username);
+	if (p==NULL) {
+		D("getpwnam: %s", strerror(errno));
+		return 0;
+	}
+	if (!get_user_cfgfile_path(NULL, "authorized_yubikeys", username, &userfile)) {
+		D("Failed figuring out per-user cfgfile");
+		return 0;
+	}
+
+	D("Dropping privileges");
+
+	if (drop_privileges(p, pamh) < 0) {
+		D("could not drop privileges");
+		free(userfile);
+		return 0;
+	}
+
+	r=check_user_token(cfg, userfile, username, otp_id);
+
+	if (restore_privileges(pamh) < 0) {
+		D("could not restore privileges");
+		free(userfile);
+		return 0;
+	}
+	free (userfile);
+
+	return r;
+}
+
 PAM_EXTERN int
 pam_sm_authenticate(pam_handle_t *pamh, int flags,
 	int argc, const char *argv[])
@@ -132,7 +340,7 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags,
 	int r;
 	char otp[MAX_TOKEN_ID_LEN + TOKEN_OTP_LEN + 1] = { 0 };
 	char otp_id[MAX_TOKEN_ID_LEN + 1] = { 0 };
-    
+
 	/* First, retrieve config data in argv */
 	parse_cfg(flags, argc, argv, &cfg);
 
@@ -194,11 +402,7 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags,
 	/* Copy only public ID into otp_id. Destination buffer is zeroed. */
 	strncpy (otp_id, password, cfg.token_id_length);
 
-	D("OTP: %s ID: %s ", otp, otp_id);
-
 	r=ykclient_request(ykc, otp);
-
-	D("made it past the ykc init..");
 
 	switch(r) {
 		case YKCLIENT_OK:
@@ -212,6 +416,14 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags,
 			goto done;
 	}
 
+	r=authorize_user_token(&cfg, user, otp_id, pamh);
+	if (r==0) {
+		D("Yubikey not authorized to login as user");
+		pam_err=PAM_AUTHINFO_UNAVAIL;
+		goto done;
+	}
+
+	pam_err=PAM_SUCCESS; // Actually IS success, from above, but better be explicit
 
 /*	r=ykclient_verify_otp_v2 (NULL, password, cfg.client_id, NULL, 1,
 		(const char **) &cfg.url, cfg.client_key);
@@ -295,4 +507,3 @@ pam_sm_chauthtok(pam_handle_t *pamh, int flags,
 #ifdef PAM_MODULE_ENTRY
 PAM_MODULE_ENTRY("pam_yubi");
 #endif
-
