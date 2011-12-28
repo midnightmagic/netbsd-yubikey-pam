@@ -1,4 +1,4 @@
-#!/usr/pkg/bin/bash
+#!/usr/pkg/bin/bash -x
 
 rm -f *.o
 rm -f *.a
@@ -15,8 +15,14 @@ do
 	"$i" -o "$BASE".o
 
 done
+
 ar cq pam_yubi_pic.a $( NM=nm lorder *.o | tsort -q )
+
 ranlib pam_yubi_pic.a
+
 cc  -Wl,-x -shared -Wl,-soname,pam_yubi.so.1 -Wl,--warn-shared-textrel         \
-	-Wl,--fatal-warnings -o pam_yubi.so.1.0  -Wl,-rpath-link,/lib:/usr/lib \
-	-L/lib  -Wl,--whole-archive pam_yubi_pic.a -Wl,--no-whole-archive
+	-Wl,--fatal-warnings -o pam_yubi.so.1  -Wl,-rpath-link,/lib:/usr/lib:/usr/local/lib \
+	-L/lib -L/usr/local/lib -Wl,-rpath -Wl,/usr/local/lib -Wl,--whole-archive pam_yubi_pic.a -Wl,--no-whole-archive \
+	-lykclient -lyubikey -lykpers-1
+
+cp -p ./pam_yubi.so.1 /usr/lib/security/pam_yubi.so.1
