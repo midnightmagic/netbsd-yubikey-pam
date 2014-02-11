@@ -16,13 +16,13 @@ do
 
 done
 
-ar cq pam_yubi_pic.a $( NM=nm lorder *.o | tsort -q )
+ar cq pam_yubi_pic.a $( NM=nm lorder pam_yubi.o | tsort -q )
 
 ranlib pam_yubi_pic.a
 
-cc  -Wl,-x -shared -Wl,-soname,pam_yubi.so.1 -Wl,--warn-shared-textrel         \
-	-Wl,--fatal-warnings -o pam_yubi.so.1  -Wl,-rpath-link,/lib:/usr/lib:/usr/local/lib \
-	-L/lib -L/usr/local/lib -Wl,-rpath -Wl,/usr/local/lib -Wl,--whole-archive pam_yubi_pic.a -Wl,--no-whole-archive \
+cc  -Wl,-x -shared -Wl,-soname,pam_yubi.so.3 -Wl,--warn-shared-textrel         \
+	-Wl,--fatal-warnings -o pam_yubi.so.3  -Wl,-rpath-link,/usr/local/lib \
+	-L/usr/local/lib -Wl,-rpath -Wl,/usr/local/lib -Wl,--whole-archive pam_yubi_pic.a -Wl,--no-whole-archive \
 	-lykclient -lyubikey -lykpers-1
 
-cp -p ./pam_yubi.so.1 /usr/lib/security/pam_yubi.so.1
+cp -p ./pam_yubi.so.3 /usr/lib/security/pam_yubi.so.3

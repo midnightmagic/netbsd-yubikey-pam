@@ -24,7 +24,7 @@
 #define PAM_EXTERN
 #endif
 
-#define D(...) openpam_log(PAM_LOG_DEBUG, __VA_ARGS__)
+#define D(...) openpam_log(PAM_LOG_NOTICE, __VA_ARGS__)
 
 #define TOKEN_OTP_LEN 32
 #define MAX_TOKEN_ID_LEN 16
@@ -64,7 +64,7 @@ static gid_t saved_egid;
 static gid_t *saved_groups;
 static int saved_groups_length;
 
-extern int _openpam_debug;
+//extern int _openpam_debug; XXX Seems to be gone now?
 
 static void parse_cfg (int flags, int argc, const char **argv, struct cfg *cfg)
 {
@@ -81,7 +81,7 @@ static void parse_cfg (int flags, int argc, const char **argv, struct cfg *cfg)
 			cfg->client_key = argv[i] + 4;
 		if (strcmp (argv[i], "debug") == 0) {
 			cfg->debug = 1;
-			_openpam_debug=1;
+//			_openpam_debug=1; XXX Seems to be gone now?
 		}
 		if (strcmp (argv[i], "alwaysok") == 0)
 			cfg->alwaysok = 1;
@@ -331,7 +331,7 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags,
 {
 	struct passwd *pwd;
 	const char *user;
-	char *password;
+	const char *password;
 	int pwd_len;
 	int pam_err, retry;
 //	int r;
@@ -364,7 +364,8 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags,
 		return (PAM_AUTH_ERR);
 
 	if (password != NULL) {
-		D("password token: %s", password);
+		if (cfg.debug)
+			D("password token: parsed");
 	} else {
 		return(PAM_AUTH_ERR);
 	}
@@ -392,7 +393,7 @@ pam_sm_authenticate(pam_handle_t *pamh, int flags,
 
 	pwd_len=strlen(password);
 	if (pwd_len < (cfg.token_id_length + TOKEN_OTP_LEN)) {
-		D("OTP too short to be considered: %i < %i", pwd_len, (cfg.token_id_length+TOKEN_OTP_LEN));
+//		D("OTP too short to be considered: %i < %i", pwd_len, (cfg.token_id_length+TOKEN_OTP_LEN));
 		pam_err=PAM_AUTH_ERR;
 		goto done;
 	}
